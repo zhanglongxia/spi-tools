@@ -36,10 +36,10 @@ static uint8_t     s_rx_buf[BUF_MAX_SIZE];
 static void print_usage(const char *prog)
 {
     printf("Usage: %s [-DsbdlHOLC3] [X] \n", prog ? prog : "");
-    printf("  -D --device   device to use (default /dev/spidev1.1)\n"
+    printf("  -D --device   device to use (default /dev/spidev1.0)\n"
            "  -s --speed    max speed (Hz)\n"
            "  -d --delay    delay (usec)\n"
-           "  -b --bpw      s_bits per word \n"
+           "  -b --bpw      bits per word \n"
            "  -l --loop     loopback\n"
            "  -H --cpha     clock phase\n"
            "  -O --cpol     clock polarity\n"
