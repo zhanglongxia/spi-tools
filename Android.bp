@@ -1,0 +1,21 @@
+cc_binary {
+    name: "spidev_test",
+    vendor: true,
+
+    cflags: [
+        "-Wno-unused-variable",
+        "-Wno-unused-parameter",
+        "-Wall",
+    ],
+
+    shared_libs: [
+        "liblog",
+        "libbase",
+        "libutils",
+        "libcutils",
+    ],
+
+    srcs: [
+        "spidev_test.c",
+    ],
+}
