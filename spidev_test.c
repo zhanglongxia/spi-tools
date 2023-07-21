@@ -19,23 +19,30 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#define BUF_MAX_SIZE 256
+#define BUF_MAX_SIZE 1024
 
 static const char *s_device   = "/dev/spidev1.0";
 static uint8_t     s_mode     = 0;
 static uint8_t     s_bits     = 8;
 static uint32_t    s_speed    = 1000000;
 static uint16_t    s_delay_us = 20;
-static uint8_t     s_size;
+static uint32_t    s_size     = 0;
 static uint8_t     s_tx_buf[BUF_MAX_SIZE];
 static uint8_t     s_rx_buf[BUF_MAX_SIZE];
+static uint32_t    s_repeat      = 1;
+static uint32_t    s_interva_ms  = 10;
+static uint8_t     s_file_is_set = 0;
+static char        s_file_path[128];
+
+static uint8_t s_default_data[] = {0xfd, 0x01, 0x51, 0xa7};
 
 static void print_usage(const char *prog)
 {
-    printf("Usage: %s [-DsbdlHOLC3] [X] \n", prog ? prog : "");
+    printf("Usage: %s [-DsbdlrifHOLC3] [X] \n", prog ? prog : "");
     printf("  -D --device   device to use (default /dev/spidev1.0)\n"
            "  -s --speed    max speed (Hz)\n"
            "  -d --delay    delay (usec)\n"
@@ -46,8 +53,13 @@ static void print_usage(const char *prog)
            "  -L --lsb      least significant bit first\n"
            "  -C --cs-high  chip select active high\n"
            "  -3 --3wire    SI/SO signals shared\n"
-           "  -X --xdata    hexadecimal data\n"
-           "./spidev_test -D /dev/spidev1.0 -s 1000000 -b 8 -X 0xaa 0xbb 0xcc\n");
+           "  -r --repeat   repeatly transmit frames\n"
+           "  -i --interval repeat interval, in ms\n"
+           "  -f --file     read spi frames from the file\n"
+           "  -X --xdata    hexadecimal data\n\n"
+           "Examples:\n"
+           "  ./spidev_test -D /dev/spidev1.0 -s 1000000 -b 8 -r 2 -i 100 -X 0xaa 0xbb 0xcc\n"
+           "  ./spidev_test -D /dev/spidev1.0 -s 1000000 -b 8 -f ./example.cfg\n");
 
     if (prog)
     {
@@ -60,6 +72,136 @@ static void pabort(const char *s)
     print_usage(NULL);
     perror(s);
     abort();
+}
+
+static void strip(char *string)
+{
+    int count = 0;
+
+    for (int i = 0; string[i]; i++)
+    {
+        if (string[i] != '\r' && string[i] != '\n')
+        {
+            string[count++] = string[i];
+        }
+    }
+
+    string[count] = '\0';
+}
+
+static int hex_to_bin(const char *hex, uint8_t *bin, uint32_t bin_length)
+{
+    size_t      hexLength = strlen(hex);
+    const char *hexEnd    = hex + hexLength;
+    uint8_t    *cur       = bin;
+    uint8_t     numChars  = hexLength & 1;
+    uint8_t     byte      = 0;
+    int         rval;
+
+    if ((hexLength + 1) / 2 > bin_length)
+    {
+        return -1;
+    }
+
+    while (hex < hexEnd)
+    {
+        if ('A' <= *hex && *hex <= 'F')
+        {
+            byte |= 10 + (*hex - 'A');
+        }
+        else if ('a' <= *hex && *hex <= 'f')
+        {
+            byte |= 10 + (*hex - 'a');
+        }
+        else if ('0' <= *hex && *hex <= '9')
+        {
+            byte |= *hex - '0';
+        }
+        else if (*hex == ' ')
+        {
+            hex++;
+            continue;
+        }
+        else
+        {
+            printf("Unknown Character (0x%02x|%c)", *hex, *hex);
+            return -1;
+        }
+
+        hex++;
+        numChars++;
+
+        if (numChars >= 2)
+        {
+            numChars = 0;
+            *cur++   = byte;
+            byte     = 0;
+        }
+        else
+        {
+            byte <<= 4;
+        }
+    }
+
+    rval = (int)(cur - bin);
+
+    return rval;
+}
+
+static int config_file_get_next(int *iterator, uint8_t *value, uint32_t *value_length)
+{
+    char     line[BUF_MAX_SIZE + 1];
+    FILE    *fp = NULL;
+    long int pos;
+    int      len;
+
+    if ((iterator == NULL) || (value == NULL) || (value_length == NULL))
+    {
+        return -1;
+    }
+
+    if ((fp = fopen(s_file_path, "r")) == NULL)
+    {
+        return -1;
+    }
+
+    if (fseek(fp, *iterator, SEEK_SET) < 0)
+    {
+        return -1;
+    }
+
+    if (fgets(line, sizeof(line), fp) == NULL)
+    {
+        return -1;
+    }
+
+    if (strlen(line) + 1 == sizeof(line))
+    {
+        // The line is too long.
+        return -1;
+    }
+
+    if ((pos = ftell(fp)) < 0)
+    {
+        return -1;
+    }
+
+    if (fp != NULL)
+    {
+        fclose(fp);
+    }
+
+    strip(line);
+    len = hex_to_bin(line, value, *value_length);
+
+    if (len < 0)
+    {
+        return -1;
+    }
+
+    *iterator     = (int)(pos);
+    *value_length = len;
+    return 0;
 }
 
 static void transfer(int fd)
@@ -104,13 +246,14 @@ static void parse_opts(int argc, char *argv[])
     {
         int                        c;
         static const struct option opts[] = {
-            {"device", 1, 0, 'D'},  {"speed", 1, 0, 's'}, {"delay", 1, 0, 'd'}, {"bpw", 1, 0, 'b'},
-            {"loop", 0, 0, 'l'},    {"cpha", 0, 0, 'H'},  {"cpol", 0, 0, 'O'},  {"lsb", 0, 0, 'L'},
-            {"cs-high", 0, 0, 'C'}, {"3wire", 0, 0, '3'}, {"no-cs", 0, 0, 'N'}, {"ready", 0, 0, 'R'},
-            {"Xdata", 1, 0, 'X'},   {NULL, 0, 0, 0},
+            {"device", 1, 0, 'D'},  {"speed", 1, 0, 's'},  {"delay", 1, 0, 'd'},    {"bpw", 1, 0, 'b'},
+            {"loop", 0, 0, 'l'},    {"cpha", 0, 0, 'H'},   {"cpol", 0, 0, 'O'},     {"lsb", 0, 0, 'L'},
+            {"cs-high", 0, 0, 'C'}, {"3wire", 0, 0, '3'},  {"no-cs", 0, 0, 'N'},    {"ready", 0, 0, 'R'},
+            {"Xdata", 1, 0, 'X'},   {"repeat", 1, 0, 'r'}, {"interval", 1, 0, 'i'}, {"file", 1, 0, 'f'},
+            {NULL, 0, 0, 0},
         };
 
-        c = getopt_long(argc, argv, "D:s:d:b:lHOLC3NRX", opts, NULL);
+        c = getopt_long(argc, argv, "D:r:i:s:d:b:f:lHOLC3NRX", opts, NULL);
         if (c == -1)
         {
             break;
@@ -120,6 +263,11 @@ static void parse_opts(int argc, char *argv[])
         {
         case 'D':
             s_device = optarg;
+            break;
+        case 'f':
+            s_file_is_set = 1;
+            memset(s_file_path, 0, sizeof(s_file_path));
+            strncpy(s_file_path, optarg, sizeof(s_file_path) - 1);
             break;
         case 's':
             s_speed = (uint32_t)atoi(optarg);
@@ -136,6 +284,9 @@ static void parse_opts(int argc, char *argv[])
         case 'H':
             s_mode |= SPI_CPHA;
             break;
+        case 'i':
+            s_interva_ms = (uint32_t)atoi(optarg);
+            break;
         case 'O':
             s_mode |= SPI_CPOL;
             break;
@@ -150,6 +301,9 @@ static void parse_opts(int argc, char *argv[])
             break;
         case 'N':
             s_mode |= SPI_NO_CS;
+            break;
+        case 'r':
+            s_repeat = (uint32_t)atoi(optarg);
             break;
         case 'R':
             s_mode |= SPI_READY;
@@ -174,11 +328,19 @@ static void parse_opts(int argc, char *argv[])
             break;
         }
     }
+
+    if (s_size == 0)
+    {
+        memcpy(s_tx_buf, s_default_data, sizeof(s_default_data));
+        s_size = sizeof(s_default_data);
+    }
 }
 
 int main(int argc, char *argv[])
 {
     int fd;
+    int index    = 0;
+    int iterator = 0;
 
     parse_opts(argc, argv);
 
@@ -231,7 +393,26 @@ int main(int argc, char *argv[])
     printf("bits per word: %d\n", s_bits);
     printf("max speed: %d Hz (%d KHz)\n", s_speed, s_speed / 1000);
 
-    transfer(fd);
+    for (uint32_t i = 0; i < s_repeat; i++)
+    {
+        if (s_file_is_set)
+        {
+            s_size = sizeof(s_tx_buf);
+            while (config_file_get_next(&iterator, s_tx_buf, &s_size) >= 0)
+            {
+                printf("\n%d.%d\n", i, index++);
+                transfer(fd);
+                usleep(s_interva_ms * 1000);
+                s_size = sizeof(s_tx_buf);
+            }
+        }
+        else
+        {
+            printf("\n%d\n", i++);
+            transfer(fd);
+            usleep(s_interva_ms * 1000);
+        }
+    }
 
     close(fd);
 
