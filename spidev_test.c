@@ -206,18 +206,43 @@ static int config_file_get_next(int *iterator, uint8_t *value, uint32_t *value_l
 
 static void transfer(int fd)
 {
-    int i;
+    int                     ret;
+    int                     i;
+    struct spi_ioc_transfer transfer[2];
 
-    struct spi_ioc_transfer transfer = {
-        .tx_buf        = (unsigned long)s_tx_buf,
-        .rx_buf        = (unsigned long)s_rx_buf,
-        .len           = s_size,
-        .delay_usecs   = s_delay_us,
-        .speed_hz      = s_speed,
-        .bits_per_word = s_bits,
-    };
+    memset(&transfer[0], 0, sizeof(transfer));
 
-    if (ioctl(fd, SPI_IOC_MESSAGE(1), &transfer) < 1)
+    // This part is the delay between C̅S̅ being asserted and the SPI clock
+    // starting. This is not supported by all Linux SPI drivers.
+    transfer[0].tx_buf        = 0;
+    transfer[0].rx_buf        = 0;
+    transfer[0].len           = 0;
+    transfer[0].speed_hz      = s_speed;
+    transfer[0].delay_usecs   = s_delay_us;
+    transfer[0].bits_per_word = s_bits;
+    transfer[0].cs_change     = 0;
+
+    // This part is the actual SPI transfer.
+    transfer[1].tx_buf        = (unsigned long)(s_tx_buf);
+    transfer[1].rx_buf        = (unsigned long)(s_rx_buf);
+    transfer[1].len           = s_size;
+    transfer[1].speed_hz      = s_speed;
+    transfer[1].delay_usecs   = 0;
+    transfer[1].bits_per_word = s_bits;
+    transfer[1].cs_change     = 0;
+
+    if (s_delay_us > 0)
+    {
+        // A C̅S̅ delay has been specified. Start transactions with both parts.
+        ret = ioctl(fd, SPI_IOC_MESSAGE(2), &transfer[0]);
+    }
+    else
+    {
+        // No C̅S̅ delay has been specified, so we skip the first part because it causes some SPI drivers to croak.
+        ret = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer[1]);
+    }
+
+    if (ret < 0)
     {
         pabort("Failed to send spi message");
     }
